@@ -17,15 +17,16 @@ disappears when it stops.
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-# 2. drop a video in input/ and run
-python extract.py input/movie.mp4
+# 2. drop your video(s) in input/ and process everything there
+python extract.py
 
-# 3. subtitle lands in output/movie.srt
+# 3. subtitles land in output/<name>.srt
 ```
 
-Options:
+Point at a single file instead of the whole folder:
 
 ```bash
+python extract.py input/movie.mp4
 python extract.py input/movie.mp4 --lang sr        # force a language (else auto-detect)
 python extract.py input/movie.mp4 --model large-v3 # any faster-whisper model
 python extract.py input/episode.mkv --intro-skip 88  # drop an 88s title sequence

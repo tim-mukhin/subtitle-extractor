@@ -18,20 +18,26 @@ then appears exactly when speech starts and disappears when it stops.
 
 Usage
 -----
-    python extract.py input/movie.mp4
+    # drop videos into input/, then process all of them:
+    python extract.py
+
+    # or point at one file:
     python extract.py input/movie.mp4 --lang sr --model large-v3
     python extract.py input/episode.mkv --intro-skip 88   # drop an 88s title sequence
 
+Audio extraction is internal (a temp wav that never touches input/ or output/).
 Output goes to output/<name>.srt
 """
 import argparse
 import re
 import subprocess
 import sys
+import tempfile
 from collections import Counter
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
+VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".ts", ".flv"}
 
 
 # ----------------------------------------------------------------------------- audio
@@ -45,11 +51,13 @@ def extract_audio(src: Path, wav: Path) -> None:
 
 
 # ------------------------------------------------------------------------- transcribe
-def transcribe_words(wav: Path, model_size: str, lang, device: str, compute: str):
-    """faster-whisper with word-level timestamps. Returns [{start,end,word}]."""
+def build_model(model_size: str, device: str, compute: str):
     from faster_whisper import WhisperModel
+    return WhisperModel(model_size, device=device, compute_type=compute)
 
-    model = WhisperModel(model_size, device=device, compute_type=compute)
+
+def transcribe_words(model, wav: Path, lang):
+    """faster-whisper with word-level timestamps. Returns [{start,end,word}]."""
     segments, info = model.transcribe(
         str(wav),
         language=lang,                     # None -> auto-detect
@@ -154,9 +162,26 @@ def write_srt(cues, path: Path) -> None:
 
 
 # ------------------------------------------------------------------------------- main
+def process_one(model, src: Path, outdir: Path, lang, seg_opts, intro_skip):
+    print(f"\n=== {src.name} ===", flush=True)
+    with tempfile.TemporaryDirectory() as td:            # wav is internal, never leaks
+        wav = Path(td) / f"{src.stem}.wav"
+        print("[1/4] audio", flush=True)
+        extract_audio(src, wav)
+        print("[2/4] transcribe", flush=True)
+        words = transcribe_words(model, wav, lang)
+    print("[3/4] resegment + clean", flush=True)
+    cues = clean(resegment(words, **seg_opts), intro_skip)
+    srt = outdir / f"{src.stem}.srt"
+    write_srt(cues, srt)
+    print(f"[4/4] done -> {srt.name}  ({len(cues)} cues)", flush=True)
+
+
 def main():
-    ap = argparse.ArgumentParser(description="Accurately-timed subtitles from video/audio.")
-    ap.add_argument("input", help="video or audio file (e.g. input/movie.mp4)")
+    ap = argparse.ArgumentParser(
+        description="Accurately-timed subtitles from video. Drop videos in input/, run, get output/*.srt.")
+    ap.add_argument("input", nargs="?",
+                    help="a video file. If omitted, processes every video in input/")
     ap.add_argument("--lang", default=None, help="ISO code (e.g. sr, en). Default: auto-detect")
     ap.add_argument("--model", default="large-v3", help="faster-whisper model (default large-v3)")
     ap.add_argument("--output-dir", default=str(ROOT / "output"))
@@ -167,26 +192,26 @@ def main():
     ap.add_argument("--max-gap", type=float, default=0.6, help="split cue on pause > this (s)")
     ap.add_argument("--max-dur", type=float, default=6.0, help="max cue duration (s)")
     ap.add_argument("--max-chars", type=int, default=84, help="max chars per cue")
-    ap.add_argument("--keep-audio", action="store_true", help="keep the extracted wav")
     args = ap.parse_args()
 
-    src = Path(args.input).resolve()
-    if not src.exists():
-        sys.exit(f"not found: {src}")
-    outdir = Path(args.output_dir); outdir.mkdir(parents=True, exist_ok=True)
-    wav = outdir / f"{src.stem}.wav"
+    if args.input:
+        sources = [Path(args.input).resolve()]
+        if not sources[0].exists():
+            sys.exit(f"not found: {sources[0]}")
+    else:
+        indir = ROOT / "input"
+        sources = sorted(p for p in indir.iterdir() if p.suffix.lower() in VIDEO_EXTS)
+        if not sources:
+            sys.exit(f"drop a video into {indir}/ (or pass a path)")
+        print(f"found {len(sources)} video(s) in input/", flush=True)
 
-    print(f"[1/4] audio  {src.name}", flush=True)
-    extract_audio(src, wav)
-    print(f"[2/4] transcribe ({args.model})", flush=True)
-    words = transcribe_words(wav, args.model, args.lang, args.device, args.compute)
-    print("[3/4] resegment + clean", flush=True)
-    cues = clean(resegment(words, args.max_gap, args.max_dur, args.max_chars), args.intro_skip)
-    srt = outdir / f"{src.stem}.srt"
-    write_srt(cues, srt)
-    if not args.keep_audio:
-        wav.unlink(missing_ok=True)
-    print(f"[4/4] done -> {srt}  ({len(cues)} cues)", flush=True)
+    outdir = Path(args.output_dir); outdir.mkdir(parents=True, exist_ok=True)
+    seg_opts = dict(max_gap=args.max_gap, max_dur=args.max_dur, max_chars=args.max_chars)
+
+    print(f"loading model {args.model} ({args.device}/{args.compute})...", flush=True)
+    model = build_model(args.model, args.device, args.compute)
+    for src in sources:
+        process_one(model, src, outdir, args.lang, seg_opts, args.intro_skip)
 
 
 if __name__ == "__main__":
