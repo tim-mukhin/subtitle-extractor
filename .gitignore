@@ -1,0 +1,13 @@
+# media you drop in / results you generate — never committed
+input/*
+output/*
+!input/.gitkeep
+!output/.gitkeep
+
+# python
+.venv/
+__pycache__/
+*.pyc
+
+# scratch audio
+*.wav

@@ -1,0 +1,4 @@
+# faster-whisper handles transcription with word-level timestamps.
+# It uses CTranslate2 under the hood (no PyTorch), so this stays lightweight.
+# You also need ffmpeg on your PATH (brew install ffmpeg / apt install ffmpeg).
+faster-whisper>=1.0
