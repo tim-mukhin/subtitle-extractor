@@ -11,3 +11,6 @@ __pycache__/
 
 # scratch audio
 *.wav
+
+# macOS
+.DS_Store
