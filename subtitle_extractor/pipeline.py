@@ -28,6 +28,7 @@ from .ensemble import (
     conservative_finalize,
     merge_resolver_results,
     rescale_words,
+    tokens,
     write_agent_inputs,
 )
 from .manifest import base_manifest, detect_heavy_work, input_fingerprint, load_json, utc_now, write_json
@@ -369,6 +370,91 @@ def _unresolved_markdown(video: str, unresolved: list[dict], alignment_failures:
     return "\n".join(lines)
 
 
+_ORIGINAL_AUDIO_BRANCHES = (
+    "original_faster_whisper",
+    "original_mlx_large",
+    "original_mlx_turbo",
+)
+
+
+def _branch_word_fallback(
+    paths: "RunPaths",
+    windows: list[dict],
+    selected: list[dict],
+    failed_ids: list[int],
+) -> list[dict]:
+    """Timing for CLASSLA-failed windows. Keep the clean ensemble-selected text and
+    spread its tokens across the speech span the closest original-audio ASR branch
+    detected inside the window. This preserves ensemble text quality (no single-branch
+    stutter) while giving sub-window timing instead of one coarse whole-window cue."""
+    if not failed_ids:
+        return []
+    branch_words: dict[str, list[dict]] = {}
+    for branch in _ORIGINAL_AUDIO_BRANCHES:
+        path = paths.asr / f"{branch}.words.json"
+        if path.exists():
+            branch_words[branch] = json.loads(path.read_text(encoding="utf-8"))
+    window_by_id = {window["window_id"]: window for window in windows}
+    selected_by_id = {item["window_id"]: item for item in selected}
+
+    def similarity(left: str, right: str) -> float:
+        a, b = set(tokens(left)), set(tokens(right))
+        return len(a & b) / len(a | b) if a and b else 0.0
+
+    out: list[dict] = []
+    for window_id in failed_ids:
+        window = window_by_id.get(window_id)
+        chosen = selected_by_id.get(window_id)
+        if not window or not chosen:
+            continue
+        pieces = chosen.get("text", "").split()
+        if not pieces:
+            continue
+        start, end = float(window["start"]), float(window["end"])
+        span_start, span_end = start, end
+        if branch_words:
+            branch = max(
+                branch_words,
+                key=lambda name: similarity(window["sources"].get(name, ""), chosen["text"]),
+            )
+            inside = [
+                w for w in branch_words[branch]
+                if w.get("start") is not None and w.get("end") is not None
+                and start <= (float(w["start"]) + float(w["end"])) / 2 <= end
+            ]
+            if inside:
+                span_start = max(start, float(inside[0]["start"]))
+                span_end = min(end, float(inside[-1]["end"]))
+        step = max(0.12, (span_end - span_start) / len(pieces))
+        for index, piece in enumerate(pieces):
+            word_start = span_start + index * step
+            out.append(
+                {
+                    "start": round(word_start, 3),
+                    "end": round(word_start + step, 3),
+                    "word": piece,
+                    "prob": 0.0,
+                }
+            )
+    return out
+
+
+def _dedup_near_words(words: list[dict], window: float = 1.2) -> list[dict]:
+    """Drop a word if the same normalized token was already kept within `window`
+    seconds. Removes duplicates where a CLASSLA-aligned word and a synthetic
+    fallback word (from overlapping ensemble windows) cover the same speech."""
+    kept: list[dict] = []
+    last_time: dict[str, float] = {}
+    for word in sorted(words, key=lambda w: (w["start"], w["end"])):
+        key = "".join(ch for ch in str(word["word"]).lower() if ch.isalnum())
+        if key and key in last_time and word["start"] - last_time[key] <= window:
+            continue
+        kept.append(word)
+        if key:
+            last_time[key] = word["start"]
+    return kept
+
+
 def finalize(workdir: Path, dry_run: bool = False) -> dict:
     workdir = workdir.expanduser().resolve()
     paths = RunPaths.from_workdir(workdir)
@@ -470,12 +556,17 @@ def finalize(workdir: Path, dry_run: bool = False) -> dict:
     output_manifest = output_srt.with_suffix(".manifest.json")
     vad_payload = json.loads(Path(config["vad_regions"]).read_text(encoding="utf-8"))
     speech = [(item["start"], item["end"]) for item in vad_payload]
-    fallback_cues = [Cue(**item) for item in json.loads(fallback_path.read_text(encoding="utf-8"))]
     alignment_failures = json.loads(alignment_failures_path.read_text(encoding="utf-8"))
 
+    # For windows CLASSLA could not align (fast/noisy speech), do not dump the whole
+    # window as one cue. Instead reuse word timestamps from the original-audio ASR
+    # branch whose text is closest to the selected text — real sub-window timing.
+    fallback_words = _branch_word_fallback(paths, windows, selected, alignment_failures)
+
     def build_final_output() -> None:
-        cues = build_cues(read_words(aligned_words_path))
-        cues = remove_overlaps(cues + fallback_cues)
+        merged = sorted(read_words(aligned_words_path) + fallback_words,
+                        key=lambda w: (w["start"], w["end"]))
+        cues = build_cues(_dedup_near_words(merged))
         cues = clean_cues(cues, float(config["intro_skip"]))
         cues = clamp_cues(cues, speech)
         write_srt(cues, output_srt)
@@ -498,10 +589,11 @@ def finalize(workdir: Path, dry_run: bool = False) -> dict:
         [output_srt, unresolved_json, unresolved_md],
         {
             "aligned_words": input_fingerprint(aligned_words_path),
-            "fallback": input_fingerprint(fallback_path),
+            "windows": input_fingerprint(paths.windows),
+            "alignment_failures": alignment_failures,
             "vad": input_fingerprint(Path(config["vad_regions"])),
             "intro_skip": config["intro_skip"],
-            "profile": "speech-tight-42x2-17cps",
+            "profile": "speech-tight-42x2-17cps-branchfallback3-dedup",
         },
         build_final_output,
     )
