@@ -9,8 +9,27 @@ output/*
 __pycache__/
 *.pyc
 
+# ensemble workdir, media, and logs
+.subtitle-ensemble/
+*.log
+*.mp4
+*.mkv
+*.webm
+*.mov
+*.avi
+*.m4v
+*.ts
+*.flv
+
 # scratch audio
 *.wav
 
+# test/tool caches
+.pytest_cache/
+.coverage
+
 # macOS
 .DS_Store
+
+# claude code agent worktrees / local state
+.claude/worktrees/
