@@ -512,7 +512,7 @@ def finalize(workdir: Path, dry_run: bool = False) -> dict:
     cache.run(
         "conservative_finalize",
         [selected_path, unresolved_work_path],
-        {"windows": input_fingerprint(paths.windows), "results": result_inputs},
+        {"windows": input_fingerprint(paths.windows), "results": result_inputs, "logic": "keep-nonempty-v2"},
         choose_text,
     )
     selected = json.loads(selected_path.read_text(encoding="utf-8"))

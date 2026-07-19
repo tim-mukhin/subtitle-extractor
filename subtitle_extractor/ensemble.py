@@ -94,7 +94,13 @@ def branch_medoid(sources: dict[str, str], flag_map: dict[str, list[str]] | None
         and not _source_has_repetition_flag(text, flags.get(key, ()))
     ]
     if not candidates:
-        return "", ""
+        # No clean source (all flagged). Prefer the longest non-empty source over
+        # dropping the window entirely — losing real dialogue is worse than a repeat.
+        non_empty = [(key, text) for key, text in sources.items() if text.strip()]
+        if not non_empty:
+            return "", ""
+        key, text = max(non_empty, key=lambda item: len(tokens(item[1])))
+        return key, text
 
     families = available_families(sources)
     scored = []
@@ -349,6 +355,14 @@ def conservative_finalize(windows: list[dict], results: list[dict]) -> tuple[lis
             status = "medoid_recovered_speech"
         elif status == "no_speech":
             text = ""
+
+        # Safety net: never drop a window the resolver actually filled with plausible
+        # speech. If the conservative pass emptied it but the resolver text is
+        # non-empty and not itself a repetition hallucination, keep the resolver text.
+        if not text.strip():
+            resolver_text = serbian_cyrillic_to_latin(result.get("selected_text", "")).strip()
+            if resolver_text and not suspicious_repetition(resolver_text):
+                text, source = resolver_text, "resolver_kept"
 
         record = {
             "window_id": window["window_id"],
